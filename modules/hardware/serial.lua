@@ -534,7 +534,7 @@ local function write(self, port, val)
 
     if serial_port and band(serial_port.mcr, MCR_LOOP) == 0 then
         serial_port.send_data = band(val, 0xFF)
-        self.receive_timer:period_start(self.transmit_period)
+        serial_port.receive_timer:period_start(serial_port.transmit_period)
     end
 end
 
