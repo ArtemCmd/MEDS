@@ -292,7 +292,6 @@ end
 local function vram_write(self, addr, val)
     self.cpu.cycles = self.cpu.cycles - wait_states[band(self.cpu.cycles, 0x0F)]
 	self.vram[band(addr, 0x3FFF)] = val
-    self.dirty = true
 end
 
 ------------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -524,6 +523,8 @@ local function update_1(self)
 end
 
 update_2 = function(self)
+    local last_cursor_state = self.cursor_visible
+
     self.timer:advance(self.disp_on_time)
     self.timer.callback = update_1
 
@@ -682,7 +683,6 @@ function videocard.new(cpu, memory, screen)
         mode_blink = false,
         mode_bw = false,
         lp_latch = false,
-        dirty = false,
         vram = {},
         render_line = render_line_text,
         vram_read = vram_read,
