@@ -2,8 +2,6 @@
 -- IBM PC-XT Fixed Disk controller emulation.
 -- =====================================================================================================================================================================
 
-local logger = require("dave_logger:logger")("MEDS")
-
 local band, bor, rshift, lshift, bxor, bnot = bit.band, bit.bor, bit.rshift, bit.lshift, bit.bxor, bit.bnot
 
 local controller = {}
@@ -295,8 +293,8 @@ local commands = {
         self.state = STATE_SEND_DATA
 
         if self.dma_enabled then
-            self.timer:advance(self.delay_20)
             self.dma:request_service(HDC_DMA)
+            self.timer:advance(self.delay_20)
         end
     end,
     [bor(STATE_SEND_DATA, 0x08)] = function(self)
@@ -343,7 +341,7 @@ local commands = {
 
         if self.dma_enabled then
             self.dma:request_service(HDC_DMA)
-            self.timer:advance(self.delay_20)
+            self.timer:advance(self.delay)
         end
     end,
 ------------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -555,7 +553,6 @@ local function update(self)
     if command then
         command(self)
     else
-        logger:error("ST506: Unknown command 0x%02X/0x%02X", command_id, self.state)
         command_error(self, ERR_BAD_COMMAND)
         command_complete(self)
     end
@@ -685,30 +682,30 @@ end
 local function insert_drive(self, num, path)
     local drive = self.drives[num]
 
-    if drive then
-        if drive.present then
-            drive.handler:save()
-        end
-
-        local file_ext = file.ext(path)
-        local file_format = file_formats[file_ext]
-
-        if file_format then
-            local handler = file_format.load(path)
-
-            drive.cylinders = handler.cylinders
-            drive.heads = handler.heads
-            drive.sectors = handler.sectors
-            drive.handler = handler
-            drive.present = true
-
-            set_switches(self)
-        else
-            logger:error("HDC: Unsupported File Format: \"%s\"", num, file_ext)
-        end
-    else
-        logger:error("HDC: Invalid Drive %d", num)
+    if not drive then
+        error("Invalid drive " .. num)
     end
+
+    if drive.present then
+        drive.handler:save()
+    end
+
+    local file_ext = file.ext(path)
+    local file_format = file_formats[file_ext]
+
+    if not file_format then
+        error("unsupported file format: " .. file_ext)
+    end
+
+    local handler = file_format.load(path)
+
+    drive.cylinders = handler.cylinders
+    drive.heads = handler.heads
+    drive.sectors = handler.sectors
+    drive.handler = handler
+    drive.present = true
+
+    set_switches(self)
 end
 
 local function initialize(self)
