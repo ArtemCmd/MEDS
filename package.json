@@ -1,0 +1,10 @@
+{
+    "id": "emulator",
+    "title": "MEDS",
+    "version": "0.1.0",
+    "creator": "Dave",
+    "description": "Multi Emulator Dave System.",
+    "dependencies": [
+        "!dave_logger"
+    ]
+}
