@@ -13,6 +13,7 @@ function on_world_open()
 
     -- HDC
     device_manager.registry("st506", "emulator:hardware/disk/st506")
+    device_manager.registry("xta", "emulator:hardware/disk/xta")
 
     -- FDC
     device_manager.registry("fdc", "emulator:hardware/floppy/fdc")
