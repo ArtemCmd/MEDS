@@ -38,6 +38,19 @@ local function write_sector(self, cylinder, head, sector, data)
     self.stream:write_bytes(data)
 end
 
+local function format_track(self, head, value, buffer)
+    self.stream:set_position(lshift(head * self.sectors, 9))
+
+    for i = 1, 512, 1 do
+        buffer[i] = value
+    end
+
+    for _ = 1, self.sectors, 1 do
+        self.stream:write_bytes(buffer)
+        self.stream:advance(512)
+    end
+end
+
 local function save(self)
     if file.is_writeable(self.path) then
         self.stream:flush()
@@ -62,6 +75,7 @@ function fdd.load(path)
         path = path,
         read_sector = read_sector,
         write_sector = write_sector,
+        format_track = format_track,
         save = save
     }
 
