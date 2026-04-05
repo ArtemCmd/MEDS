@@ -586,6 +586,8 @@ local commands = {
             self.head = 0
         end
 
+        drive.edited = true
+
         self.msr = STATUS_BUSY
         self.state = STATE_IDLE
         self.timer:set_delay(256 * self.timer.scheduler.NANOSECOND)
