@@ -22,6 +22,17 @@ local function set_pixel_rgb_i(self, index, color)
     self.buffer4[index + 1] = temp
 end
 
+local function fill_rgb_i(self, index, length, color)
+    local temp = band(rshift(color, 16), 0xFF)
+    temp = bor(temp, band(color, 0x00FF00))
+    temp = bor(temp, lshift(band(color, 0x0000FF), 16))
+    temp = bor(temp, 0xFF000000)
+
+    for i = 1, length, 1 do
+        self.buffer4[index + i] = temp
+    end
+end
+
 local function get_resolution(self)
     return self.width, self.height
 end
@@ -70,6 +81,7 @@ function screen.new()
         set_scale = set_scale,
         get_pixel_rgb_i = get_pixel_rgb_i,
         set_pixel_rgb_i = set_pixel_rgb_i,
+        fill_rgb_i = fill_rgb_i,
         reset = reset
     }
 

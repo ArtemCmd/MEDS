@@ -1,5 +1,5 @@
 -- =====================================================================================================================================================================
--- IBM Monochrome Display Adapter (MDA) emulation.
+-- IBM Monochrome Display Adapter emulation.
 -- =====================================================================================================================================================================
 
 local band, bor, rshift, lshift, bxor, bnot = bit.band, bit.bor, bit.rshift, bit.lshift, bit.bxor, bit.bnot
@@ -266,10 +266,17 @@ local palette = {
     {0xFFFFFF, 0x000000}
 }
 
-
 local function update_timings(self)
     self.delay_off = math.floor(((self.crtc_horizontal_total + 1) - self.crtc_horizontal_displayed) * self.clock)
     self.delay_on = math.floor(self.crtc_horizontal_displayed * self.clock)
+
+    if self.delay_off < self.timer.scheduler.NANOSECOND then
+        self.delay_off = self.timer.scheduler.NANOSECOND
+    end
+
+    if self.delay_on < self.timer.scheduler.NANOSECOND then
+        self.delay_on = self.timer.scheduler.NANOSECOND
+    end
 end
 
 local crtc_regs_write = {
@@ -302,15 +309,15 @@ local crtc_regs_write = {
         self.crtc_max_scanline = band(val, 0x1F)
     end,
     [0x0A] = function(self, val) -- Cursor Start Register
-        self.crtc_cursor_start = band(val, 0x1F)
+        self.crtc_cursor_start = val
     end,
     [0x0B] = function(self, val) -- Cursor End Register
         self.crtc_cursor_end = band(val, 0x1F)
     end,
-    [0x0C] = function(self, val) -- Start Address Register High
+    [0x0C] = function(self, val) -- Start vma Register High
         self.crtc_start_addr = bor(band(self.crtc_start_addr, 0x00FF), lshift(band(val, 0x3F), 8))
     end,
-    [0x0D] = function(self, val) -- Start Address Register Low
+    [0x0D] = function(self, val) -- Start vma Register Low
         self.crtc_start_addr = bor(band(self.crtc_start_addr, 0xFF00), val)
     end,
     [0x0E] = function(self, val) -- Cursor Location Register High
@@ -323,7 +330,7 @@ local crtc_regs_write = {
 
 local crtc_regs_read = {
     [0x0E] = function(self)
-        return band(rshift(self.crtc_cursor_addr, 8), 0xFF)
+        return rshift(self.crtc_cursor_addr, 8)
     end,
     [0x0F] = function(self)
         return band(self.crtc_cursor_addr, 0xFF)
@@ -335,11 +342,11 @@ local crtc_regs_read = {
 ------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 local function vram_read(self, addr)
-    return self[band(addr, 0xFFF)]
+    return self[band(addr, 0xFFF) + 1]
 end
 
 local function vram_write(self, addr, val)
-    self[band(addr, 0xFFF)] = val
+    self[band(addr, 0xFFF) + 1] = val
 end
 
 ------------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -391,19 +398,15 @@ local function update_1(self)
     self.status = bor(self.status, 0x01)
 
     if self.display_on and self.video_enable then
-        local screen_buffer_index = self.current_line * 720
+        local chr, attr, color, colors, row, foreground, background
+        local index = self.current_line * 720
 
         for x = 0, 719, 9 do
-            local chr = self.vram[band(lshift(self.address, 1), 0xFFF)]
-            local attr = self.vram[band(lshift(self.address, 1) + 1, 0xFFF)]
-            local glyph_row = font_9_14[lshift(self.scanline, 8) + chr + 1]
-            local draw_cursor = (self.crtc_cursor_addr == self.address) and self.cursor_enable and self.cursor_visible
-            local blink = self.blink_enabled and self.blink_char_enable and (band(attr, 0x80) ~= 0) and (not draw_cursor)
-            local colors = palette[attr]
-            local foreground
-            local background
+            chr, attr = self.vram[band(lshift(self.vma, 1), 0xFFF) + 1], self.vram[band(lshift(self.vma, 1) + 1, 0xFFF) + 1]
+            colors = palette[attr]
 
-            if blink or draw_cursor then
+            if (self.blink_enabled and self.blink_char_enable and (band(attr, 0x80) ~= 0)) or
+               ((self.crtc_cursor_addr == self.vma) and self.cursor_enable and self.cursor_visible) then
                 foreground = colors[2]
                 background = colors[1]
             else
@@ -412,37 +415,31 @@ local function update_1(self)
             end
 
             if (self.scanline == 12) and (band(attr, 0x07) == 0x01) then -- Underline
-                for i = 0, 8, 1 do
-                    self.screen:set_pixel_rgb_i(screen_buffer_index + x + i, foreground)
-                end
+                self.screen:fill_rgb_i(index + x, 9, foreground)
             else
-                local color
+                row = font_9_14[lshift(self.scanline, 8) + chr + 1]
 
                 for i = 0, 7, 1 do
-                    if (band(glyph_row, rshift(0x80, band(i, 0x07))) ~= 0) then
+                    if (band(row, rshift(0x80, band(i, 0x07))) ~= 0) then
                         color = foreground
                     else
                         color = background
                     end
 
-                    self.screen:set_pixel_rgb_i(screen_buffer_index + x + i, color)
+                    self.screen:set_pixel_rgb_i(index + x + i, color)
                 end
 
                 if band(chr, 0xE0) == 0xC0 then
-                    self.screen:set_pixel_rgb_i(screen_buffer_index + x + 8, color)
+                    self.screen:set_pixel_rgb_i(index + x + 8, color)
                 else
-                    self.screen:set_pixel_rgb_i(screen_buffer_index + x + 8, background)
+                    self.screen:set_pixel_rgb_i(index + x + 8, background)
                 end
             end
 
-            self.address = self.address + 1
+            self.vma = self.vma + 1
         end
     elseif self.display_on then
-        local index = self.current_line * 720
-
-        for x = 0, 719, 1 do
-            self.screen:set_pixel_rgb_i(index + x, 0x000000)
-        end
+        self.screen:fill_rgb_i(self.current_line * 720, 719, 0x000000)
     end
 
     if (self.vlc == self.crtc_vsync) and (self.scanline == 0) then
@@ -479,7 +476,7 @@ update_2 = function(self)
     if self.scanline == self.crtc_max_scanline then
         local old_vlc = self.vlc
 
-        self.start_address = self.address
+        self.vma_t = self.vma
         self.scanline = 0
         self.vlc = band(self.vlc + 1, 0x7F)
 
@@ -489,10 +486,10 @@ update_2 = function(self)
 
         if old_vlc == self.crtc_vertical_total then
             self.vlc = 0
-            self.display_on = true
-            self.start_address = self.crtc_start_addr
-            self.address = self.start_address
             self.current_line = 0
+            self.vma_t = self.crtc_start_addr
+            self.vma = self.vma_t
+            self.display_on = true
 
             if band(self.crtc_cursor_start, 0x60) == 0x20 then
                 self.cursor_enable = false
@@ -514,10 +511,10 @@ update_2 = function(self)
         end
     else
         self.scanline = band(self.scanline + 1, 0x1F)
-        self.address = self.start_address
+        self.vma = self.vma_t
     end
 
-    if self.scanline == self.crtc_cursor_start then
+    if self.scanline == band(self.crtc_cursor_start, 0x1F) then
         self.cursor_visible = true
     end
 
@@ -544,7 +541,7 @@ local function reset(self)
     self.crtc_vertical_displayed = 0x19
     self.crtc_vsync = 0x19
     self.crtc_max_scanline = 0x0D
-    self.crtc_cursor_start = 0
+    self.crtc_cursor_start = 0x00
     self.crtc_cursor_end = 0
     self.crtc_start_addr = 0
     self.crtc_cursor_addr = 0
@@ -552,11 +549,9 @@ local function reset(self)
     self.current_line = 0
     self.scanline = 0
     self.vlc = 0
-    self.address = 0
-    self.start_address = 0
+    self.vma = 0
+    self.vma_t = 0
     self.blink = 0
-    self.delay_off = 136
-    self.delay_on = 640
     self.vsync_time = 0
     self.blink_enabled = false
     self.blink_char_enable = false
@@ -568,6 +563,8 @@ local function reset(self)
     self.timer.callback = update_1
     self.timer:set_delay(self.delay_off)
 
+    update_timings(self)
+
     self.screen:set_scale(1.0, 1.0)
     self.screen:set_resolution(720, 350)
 end
@@ -575,36 +572,35 @@ end
 function mda.new(cpu, memory, screen)
     local self = {
         screen = screen,
-        crtc_index = 0,
-        crtc_horizontal_total = 0x61,
-        crtc_horizontal_displayed = 0x50,
-        crtc_vertical_total = 0x19,
-        crtc_vertical_displayed = 0x19,
-        crtc_vsync = 0x19,
-        crtc_max_scanline = 0x0D,
-        crtc_cursor_start = 0,
-        crtc_cursor_end = 0,
-        crtc_start_addr = 0,
-        crtc_cursor_addr = 0,
+        crtc_index = 0x00,
+        crtc_horizontal_total = 0x00,
+        crtc_horizontal_displayed = 0x00,
+        crtc_vertical_total = 0x00,
+        crtc_vertical_displayed = 0x00,
+        crtc_vsync = 0x00,
+        crtc_max_scanline = 0x00,
+        crtc_cursor_start = 0x00,
+        crtc_cursor_end = 0x00,
+        crtc_start_addr = 0x0000,
+        crtc_cursor_addr = 0x0000,
         status = 0xF0,
-        current_line = 0,
-        scanline = 0,
-        vlc = 0,
-        address = 0,
-        start_address = 0,
-        blink = 0,
-        delay_on = 640,
-        delay_off = 136,
+        current_line = 0x00,
+        scanline = 0x00,
+        vlc = 0x00,
+        vma = 0x0000,
+        vma_t = 0x0000,
+        blink = 0x00,
+        delay_on = 0,
+        delay_off = 0,
         clock = 8,
         vsync_time = 0,
         display_on = false,
-        vertical_beam = true,
         blink_enabled = false,
         video_enable = false,
         blink_char_enable = false,
         cursor_enable = false,
         cursor_visible = false,
-        vram = {},
+        vram = Bytearray(0x1000),
         set_clock = set_clock,
         get_type = get_type,
         reset = reset
@@ -628,10 +624,6 @@ function mda.new(cpu, memory, screen)
     cpu_io:set_out_function_argument(0x3B8, self)
     cpu_io:set_function_argument(0x3B9, self)
     cpu_io:set_in_function_argument(0x3BA, self)
-
-    for i = 0, 0xFFF, 1 do
-        self.vram[i] = 0x00
-    end
 
     memory:add_mapping(0xB0000, 0x8000, vram_read, vram_write, self.vram)
 

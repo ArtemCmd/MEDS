@@ -3,8 +3,6 @@
 -- Ported from https://github.com/86Box/86Box/blob/master/src/timer.c
 -- =====================================================================================================================================================================
 
-local logger = require("dave_logger:logger")("MEDS")
-
 local scheduler = {}
 
 local function timer_disable(self)
@@ -155,8 +153,6 @@ local function process(self)
         return
     end
 
-    -- local clock = os.clock()
-
     while true do
         local timer = self.head
 
@@ -191,12 +187,6 @@ local function process(self)
             timer.callback(timer.arg)
             timer.in_callback = false
         end
-
-        -- if (os.clock() - clock) > 0.5 then
-        --     local info = debug.getinfo(timer.callback, "S")
-        --     logger:debug("Scheduler: %s(%d/%d)", info.source, info.linedefined, info.lastlinedefined)
-        --     clock = os.clock()
-        -- end
     end
 
     self.target = self.head.clock
