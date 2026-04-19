@@ -76,7 +76,7 @@ local function poll(self)
 end
 
 local function set_clock(self, clock)
-    self.delay = math.floor(self.timer.scheduler.USEC * (1000000 / SPEAKER_FREQ))
+    self.delay = math.floor(self.timer.scheduler.NANOSECOND * (1000000 / SPEAKER_FREQ))
 end
 
 local function get_handler(self)
