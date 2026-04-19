@@ -1,5 +1,5 @@
 -- =====================================================================================================================================================================
--- Programmable Interrupt Controller (PIC) emulation.
+-- Programmable Interrupt Controller emulation.
 -- =====================================================================================================================================================================
 
 local band, bor, rshift, lshift, bxor, bnot = bit.band, bit.bor, bit.rshift, bit.lshift, bit.bxor, bit.bnot
@@ -198,7 +198,7 @@ end
 
 local function port_command_in(self, cpu, port)
     if band(self.ocw3, OCW3_POLL_ACTION) ~= 0 then
-        self.interrupt = bor(self.interrupt, 0x20) -- Disable Interrupts
+        self.interrupt = band(self.interrupt, bnot(0x20)) -- Disable Interrupts
 
         if self.int_pending then
             local irq = band(self.interrupt, 0x07)
