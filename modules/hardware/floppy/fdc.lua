@@ -55,7 +55,8 @@ local sector_sizes = {
 }
 
 local file_formats = {
-    ["img"] = require("emulator:hardware/floppy/fdd_img")
+    ["img"] = require("emulator:hardware/floppy/fdd_img"),
+    ["ima"] = require("emulator:hardware/floppy/fdd_img")
 }
 
 local function create_drive(self, num)
@@ -876,7 +877,7 @@ local function insert_drive(self, num, path, write_protected)
         error("invalid drive: " .. num)
     end
 
-    local file_ext = file.ext(path)
+    local file_ext = string.lower(file.ext(path))
     local file_format = file_formats[file_ext]
 
     if not file_format then

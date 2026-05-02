@@ -60,21 +60,11 @@ local mod_rm = {
 }
 
 local function clock_timer(self)
-    local diff = self.cycles_start - self.cycles
-
-    self.scheduler.clock = self.scheduler.clock + diff * 3
+    self.scheduler.clock = self.scheduler.clock + (self.cycles_start - self.cycles) * 3
 
     if self.scheduler.clock >= self.scheduler.target then
         self.scheduler:process()
     end
-end
-
-local function to_sign_8(val)
-    return val - lshift(band(val, 0x80), 1)
-end
-
-local function to_sign_16(val)
-    return val - lshift(band(val, 0x8000), 1)
 end
 
 local function set_of_add(self, bits, oper1, oper2, result)
@@ -95,7 +85,6 @@ end
 
 local function set_of_rot(self, bits, val, result)
     local flag = band(bxor(result, val), lshift(1, bits - 1))
-
     flag = rshift(lshift(flag, rshift(16 - bits, 1)), band(rshift(bits, 2), 0x04))
     self.flags = bor(band(self.flags, bnot(FLAG_O)), flag)
 end
@@ -116,30 +105,6 @@ local function set_apzs(self, bits, oper1, oper2, result)
     self.flags = bor(band(self.flags, bnot(FLAG_A)), band(bxor(bxor(result, oper2), oper1), 0x10))
 end
 
-local function set_flags_bit(self, bits, result)
-    self.flags = band(self.flags, CLEAR_CAO)
-    set_pzs(self, bits, result)
-end
-
-local function memory_read16(self, segment, offset)
-    local low = self.memory:read8(segment + offset)
-    local high = self.memory:read8(segment + band(offset + 1, 0xFFFF))
-
-    self.cycles = self.cycles - 8
-
-    return bor(low, lshift(high, 8))
-end
-
-local function read_memory(self, opcode, segment, offset)
-    if band(opcode, 0x01) == 0x01 then
-        return memory_read16(self, segment, band(offset, 0xFFFF))
-    end
-
-    self.cycles = self.cycles - 4
-
-    return self.memory:read8(segment + band(offset, 0xFFFF))
-end
-
 local function fetch_byte(self)
     local addr = lshift(self.segments[SEG_CS], 4) + self.ip
     self.ip = band(self.ip + 1, 0xFFFF)
@@ -154,14 +119,6 @@ local function fetch_word(self)
     return self.memory:read16_l(addr)
 end
 
-local function fetch(self, word)
-    if word then
-        return fetch_word(self)
-    end
-
-    return fetch_byte(self)
-end
-
 local function get_reg_byte(self, reg)
     local reg_index = band(reg, 0x03) + 1
 
@@ -172,30 +129,24 @@ local function get_reg_byte(self, reg)
     return band(self.regs[reg_index], 0xFF)
 end
 
-local function get_reg(self, opcode, reg)
-    if band(opcode, 0x1) == 0x1 then
-        return self.regs[reg + 1]
-    end
-
-    return get_reg_byte(self, reg)
-end
-
 local function set_reg_byte(self, reg, val)
     local reg_index = band(reg, 0x03) + 1
 
     if reg > 3 then
         self.regs[reg_index] = bor(band(self.regs[reg_index], 0x00FF), lshift(band(val, 0xFF), 8))
-    else
-        self.regs[reg_index] = bor(band(self.regs[reg_index], 0xFF00), band(val, 0xFF))
+        return
     end
+
+    self.regs[reg_index] = bor(band(self.regs[reg_index], 0xFF00), band(val, 0xFF))
 end
 
 local function set_reg(self, opcode, reg, val)
-    if band(opcode, 0x01) == 0x01 then
+    if band(opcode, 0x01) ~= 0 then
         self.regs[reg + 1] = band(val, 0xFFFF)
-    else
-        set_reg_byte(self, reg, val)
+        return
     end
+
+    set_reg_byte(self, reg, val)
 end
 
 local function do_mod_rm(self)
@@ -216,27 +167,30 @@ local function do_mod_rm(self)
         self.ea_addr = fetch_word(self)
         self.ea_seg = lshift(self.segments[self.segment_mode or SEG_DS], 4)
         self.cycles = self.cycles - 2
-    else
-        local temp_ea = mod_rm[self.rm](self)
-
-        if (self.rm == 0) or (self.rm == 3) then
-            self.cycles = self.cycles - 2
-        elseif (self.rm == 1) or (self.rm == 2) then
-            self.cycles = self.cycles - 3
-        end
-
-        if self.mode == 1 then
-            self.cycles = self.cycles - 3
-            temp_ea = temp_ea + to_sign_8(fetch_byte(self))
-        elseif self.mode == 2 then
-            self.cycles = self.cycles - 3
-            temp_ea = temp_ea + fetch_word(self)
-        end
-
-        self.ea_addr = band(temp_ea, 0xFFFF)
-        self.ea_seg = lshift(self.segments[self.segment_mode or rm_seg_table[self.rm]], 4)
-        self.cycles = self.cycles - 2
+        return
     end
+
+    local temp_ea = mod_rm[self.rm](self)
+
+    if (self.rm == 0) or (self.rm == 3) then
+        self.cycles = self.cycles - 2
+    elseif (self.rm == 1) or (self.rm == 2) then
+        self.cycles = self.cycles - 3
+    end
+
+    if self.mode == 1 then
+        local imm = fetch_byte(self)
+        imm = imm - lshift(band(imm, 0x80), 1)
+        temp_ea = temp_ea + imm
+        self.cycles = self.cycles - 3
+    elseif self.mode == 2 then
+        self.cycles = self.cycles - 3
+        temp_ea = temp_ea + fetch_word(self)
+    end
+
+    self.ea_addr = band(temp_ea, 0xFFFF)
+    self.ea_seg = lshift(self.segments[self.segment_mode or rm_seg_table[self.rm]], 4)
+    self.cycles = self.cycles - 2
 end
 
 local function read_rm_byte(self)
@@ -244,6 +198,7 @@ local function read_rm_byte(self)
         return get_reg_byte(self, self.rm)
     end
 
+    self.cycles = self.cycles - 4
     return self.memory:read8(self.ea_seg + self.ea_addr)
 end
 
@@ -252,30 +207,33 @@ local function read_rm_word(self)
         return self.regs[self.rm + 1]
     end
 
-    return memory_read16(self, self.ea_seg, self.ea_addr)
+    self.cycles = self.cycles - 8
+    return bor(self.memory:read8(self.ea_seg + self.ea_addr), lshift(self.memory:read8(self.ea_seg + band(self.ea_addr + 1, 0xFFFF)), 8))
 end
 
 local function write_rm_byte(self, val)
     if self.mode == 3 then
         set_reg_byte(self, self.rm, val)
-    else
-        self.memory:write8(self.ea_seg + self.ea_addr, band(val, 0xFF))
-        self.cycles = self.cycles - 4
+        return
     end
+
+    self.memory:write8(self.ea_seg + self.ea_addr, band(val, 0xFF))
+    self.cycles = self.cycles - 4
 end
 
 local function write_rm_word(self, val)
     if self.mode == 3 then
         self.regs[self.rm + 1] = band(val, 0xFFFF)
-    else
-        self.memory:write8(self.ea_seg + self.ea_addr, band(val, 0xFF))
-        self.memory:write8(self.ea_seg + band(self.ea_addr + 1, 0xFFFF), band(rshift(val, 8), 0xFF))
-        self.cycles = self.cycles - 8
+        return
     end
+
+    self.memory:write8(self.ea_seg + self.ea_addr, band(val, 0xFF))
+    self.memory:write8(self.ea_seg + band(self.ea_addr + 1, 0xFFFF), band(rshift(val, 8), 0xFF))
+    self.cycles = self.cycles - 8
 end
 
 local function read_rm(self, opcode)
-    if band(opcode, 0x01) == 0x01 then
+    if band(opcode, 0x01) ~= 0 then
         return read_rm_word(self)
     end
 
@@ -283,11 +241,12 @@ local function read_rm(self, opcode)
 end
 
 local function write_rm(self, opcode, val)
-    if band(opcode, 0x1) == 0x1 then
+    if band(opcode, 0x1) ~= 0 then
         write_rm_word(self, val)
-    else
-        write_rm_byte(self, val)
+        return
     end
+
+    write_rm_byte(self, val)
 end
 
 local function push(self, val)
@@ -303,13 +262,13 @@ end
 
 local function pop(self)
     local base_addr = lshift(self.segments[SEG_SS], 4)
-    local low = self.memory:read8(base_addr + self.regs[REG_SP])
-    local high = self.memory:read8(base_addr + band(self.regs[REG_SP] + 1, 0xFFFF))
+    local val = self.memory:read8(base_addr + self.regs[REG_SP])
+    val = bor(val, lshift(self.memory:read8(base_addr + band(self.regs[REG_SP] + 1, 0xFFFF)), 8))
 
-    self.cycles = self.cycles - 8
     self.regs[REG_SP] = band(self.regs[REG_SP] + 2, 0xFFFF)
+    self.cycles = self.cycles - 8
 
-    return bor(low, lshift(high, 8))
+    return val
 end
 
 local function call_interrupt(self, id)
@@ -383,23 +342,23 @@ local function cpu_add(self, opcode, alu_opcode, oper1, oper2)
 end
 
 local function cpu_or(self, opcode, alu_opcode, oper1, oper2)
-    local bits = lshift(8, band(opcode, 0x01))
     local result = bor(oper1, oper2)
-    set_flags_bit(self, bits, result)
+    self.flags = band(self.flags, CLEAR_CAO)
+    set_pzs(self, lshift(8, band(opcode, 0x01)), result)
     return result
 end
 
 local function cpu_test(self, opcode, alu_opcode, oper1, oper2)
-    local bits = lshift(8, band(opcode, 0x01))
     local result = band(oper1, oper2)
-    set_flags_bit(self, bits, result)
+    self.flags = band(self.flags, CLEAR_CAO)
+    set_pzs(self, lshift(8, band(opcode, 0x01)), result)
     return result
 end
 
 local function cpu_xor(self, opcode, alu_opcode, oper1, oper2)
-    local bits = lshift(8, band(opcode, 0x01))
     local result = bxor(oper1, oper2)
-    set_flags_bit(self, bits, result)
+    self.flags = band(self.flags, CLEAR_CAO)
+    set_pzs(self, lshift(8, band(opcode, 0x01)), result)
     return result
 end
 
@@ -538,12 +497,10 @@ local function cpu_mul(self, bits, oper1, oper2)
         a = temp
     end
 
-    local mask = bor(FLAG_C, FLAG_O)
-
     if c ~= 0 then
-        self.flags = bor(self.flags, mask)
+        self.flags = bor(self.flags, bor(FLAG_C, FLAG_O))
     else
-        self.flags = band(self.flags, bnot(mask))
+        self.flags = band(self.flags, bnot(bor(FLAG_C, FLAG_O)))
     end
 
     return bor(a, lshift(c, bits))
@@ -562,7 +519,6 @@ local function cpu_imul(self, bits, oper1, oper2)
     if band(a, high_bit) == 0 then
         if band(b, high_bit) ~= 0 then
             self.cycles = self.cycles - 1
-
             b = bnot(b) + 1
             negate = true
         end
@@ -600,12 +556,10 @@ local function cpu_imul(self, bits, oper1, oper2)
 
     set_apzs(self, 16, c, 0, result)
 
-    local mask = bor(FLAG_C, FLAG_O)
-
     if result ~= 0 then
-        self.flags = bor(self.flags, mask)
+        self.flags = bor(self.flags, bor(FLAG_C, FLAG_O))
     else
-        self.flags = band(self.flags, bnot(mask))
+        self.flags = band(self.flags, bnot(bor(FLAG_C, FLAG_O)))
     end
 
     return bor(a, lshift(c, bits))
@@ -617,6 +571,7 @@ local function cpu_div(self, bits, high, low, oper2)
     local tmp_high = high
     local tmp_low = low
     local tmp_oper2 = band(oper2, size_mask)
+    local tmp
     local carry = (tmp_oper2 > band(high, size_mask)) and 0x01 or 0x00
     local result = high - oper2
 
@@ -636,13 +591,13 @@ local function cpu_div(self, bits, high, low, oper2)
     for i = 1, bits, 1 do
         self.cycles = self.cycles - 8
 
-        local new_low = bor(lshift(tmp_low, 1), carry)
+        tmp = bor(lshift(tmp_low, 1), carry)
         carry = rshift(band(tmp_low, high_bit), bits - 1)
-        tmp_low = new_low
+        tmp_low = tmp
 
-        local new_high = bor(lshift(tmp_high, 1), carry)
+        tmp = bor(lshift(tmp_high, 1), carry)
         carry = rshift(band(tmp_high, high_bit), bits - 1)
-        tmp_high = new_high
+        tmp_high = tmp
 
         if carry ~= 0 then
             carry = 0
@@ -670,7 +625,7 @@ local function cpu_div(self, bits, high, low, oper2)
     end
 
     tmp_low = bor(lshift(tmp_low, 1), carry)
-    carry = band(tmp_low, high_bit)
+    carry = rshift(band(tmp_low, high_bit), bits - 1)
 
     self.flags = bor(band(self.flags, bnot(FLAG_C)), carry)
 
@@ -779,11 +734,11 @@ end
 local function string_increment(self, opcode, val)
     local amount = lshift(1, band(opcode, 0x1))
 
-    if band(self.flags, FLAG_D) ~= 0 then
-        return band(val - amount, 0xFFFF)
-    else
+    if band(self.flags, FLAG_D) == 0 then
         return band(val + amount, 0xFFFF)
     end
+
+    return band(val - amount, 0xFFFF)
 end
 
 local function cpu_loads(self, opcode)
@@ -793,16 +748,11 @@ local function cpu_loads(self, opcode)
     self.regs[REG_SI] = string_increment(self, opcode, self.regs[REG_SI])
 
     if band(opcode, 0x01) == 0x01 then
-        local low = self.memory:read8(base + offset)
-        local high = self.memory:read8(base + band(offset + 1, 0xFFFF))
-
         self.cycles = self.cycles - 8
-
-        return bor(low, lshift(high, 8))
+        return bor(self.memory:read8(base + offset), lshift(self.memory:read8(base + band(offset + 1, 0xFFFF)), 8))
     end
 
     self.cycles = self.cycles - 4
-
 
     return self.memory:read8(base + offset)
 end
@@ -869,7 +819,7 @@ end
 --- Arithmetic/logical instructions.
 ------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
--- ALU RM, R / R, RM
+-- ALU R/M, R/M
 local alu_opcodes_code = {
     [0] = "cpu_add(self, opcode, %s, %s)",
     [1] = "cpu_or(self, opcode, %s, %s)",
@@ -930,7 +880,7 @@ local function generate_opcode_alu_rm_rm(opcode)
         output = "self.cycles = self.cycles - 1"
     end
 
-    opcodes[opcode] = load(string.format(code, generate_read_rm(opcode), generate_read_reg(opcode), string.format(alu_opcodes_code[alu_opcode], tostring(alu_opcode), operands), output), "=i8088.lua-alu", "t")(do_mod_rm, read_rm, get_reg_byte, write_rm, set_reg, cpu_add, cpu_or, cpu_sub, cpu_test, cpu_xor, read_rm_word, read_rm_byte, FLAG_C, band)
+    opcodes[opcode] = load(string.format(code, generate_read_rm(opcode), generate_read_reg(opcode), string.format(alu_opcodes_code[alu_opcode], tostring(alu_opcode), operands), output), "=i8088.lua-alu_rm_rm", "t")(do_mod_rm, read_rm, get_reg_byte, write_rm, set_reg, cpu_add, cpu_or, cpu_sub, cpu_test, cpu_xor, read_rm_word, read_rm_byte, FLAG_C, band)
 end
 
 generate_opcode_alu_rm_rm(0x00)
@@ -999,7 +949,7 @@ local function generate_opcode_alu_ax_imm(opcode)
             %s
             self.cycles = self.cycles - 3
         end
-    ]], operand1, operand2, operaton, output), "i8088-alu_ax_imm", "t", _G)(band, bor, fetch_word, fetch_byte, FLAG_C, cpu_add, cpu_or, cpu_sub, cpu_test, cpu_xor)
+    ]], operand1, operand2, operaton, output), "i8088.lua-alu_ax_imm", "t", _G)(band, bor, fetch_word, fetch_byte, FLAG_C, cpu_add, cpu_or, cpu_sub, cpu_test, cpu_xor)
 end
 
 generate_opcode_alu_ax_imm(0x04)
@@ -1019,7 +969,7 @@ generate_opcode_alu_ax_imm(0x35)
 generate_opcode_alu_ax_imm(0x3C)
 generate_opcode_alu_ax_imm(0x3D)
 
--- INC r16
+-- INC REG16
 opcodes[0x40] = function(self, opcode)
     local reg = band(opcode, 0x07) + 1
     local val = self.regs[reg]
@@ -1039,7 +989,7 @@ opcodes[0x45] = opcodes[0x40]
 opcodes[0x46] = opcodes[0x40]
 opcodes[0x47] = opcodes[0x40]
 
--- DEC r16
+-- DEC REG16
 opcodes[0x48] = function(self, opcode)
     local reg = band(opcode, 0x07) + 1
     local val = self.regs[reg]
@@ -1059,31 +1009,33 @@ opcodes[0x4D] = opcodes[0x48]
 opcodes[0x4E] = opcodes[0x48]
 opcodes[0x4F] = opcodes[0x48]
 
--- TEST rm, reg
+-- TEST R/M8, REG8
 opcodes[0x84] = function(self, opcode)
     do_mod_rm(self)
-
-    local bits = lshift(8, band(opcode, 0x01))
-    local result = band(read_rm(self, opcode), get_reg(self, opcode, self.reg))
-
-    set_flags_bit(self, bits, result)
-    self.cycles = self.cycles - 3
-
-    if self.mode == 3 then
-        self.cycles = self.cycles - 2
-    end
+    set_pzs(self, 8, band(read_rm_byte(self), get_reg_byte(self, self.reg)))
+    self.flags = band(self.flags, CLEAR_CAO)
+    self.cycles = self.cycles - 3 - rshift(band(self.mode + 1, 0x04), 1)
 end
-opcodes[0x85] = opcodes[0x84]
 
--- TEST AL, imm8
+-- TEST R/M16, REG16
+opcodes[0x85] = function(self)
+    do_mod_rm(self)
+    set_pzs(self, 16, band(read_rm_word(self), self.regs[self.reg + 1]))
+    self.flags = band(self.flags, CLEAR_CAO)
+    self.cycles = self.cycles - 3 - rshift(band(self.mode + 1, 0x04), 1)
+end
+
+-- TEST AL, IMM8
 opcodes[0xA8] = function(self, opcode)
-    set_flags_bit(self, 8, band(band(self.regs[REG_AX], 0xFF), fetch_byte(self)))
+    self.flags = band(self.flags, CLEAR_CAO)
+    set_pzs(self, 8, band(band(self.regs[REG_AX], 0xFF), fetch_byte(self)))
     self.cycles = self.cycles - 2
 end
 
--- TEST AX, imm16
+-- TEST AX, IMM16
 opcodes[0xA9] = function(self, opcode)
-    set_flags_bit(self, 16, band(self.regs[REG_AX], fetch_word(self)))
+    self.flags = band(self.flags, CLEAR_CAO)
+    set_pzs(self, 16, band(self.regs[REG_AX], fetch_word(self)))
     self.cycles = self.cycles - 2
 end
 
@@ -1125,24 +1077,19 @@ opcodes[0xD4] = function(self, opcode)
 
     local al = band(self.regs[REG_AX], 0xFF)
     local new_ah = math.floor(al / val)
-    local new_al = al % val
+    al = al % val
 
-    set_pzs(self, 8, new_al)
+    set_pzs(self, 8, al)
 
-    self.regs[REG_AX] = bor(lshift(band(new_ah, 0xFF), 8), band(new_al, 0xFF))
+    self.regs[REG_AX] = bor(lshift(band(new_ah, 0xFF), 8), band(al, 0xFF))
     self.cycles = self.cycles - 78
 end
 
 -- AAD
 opcodes[0xD5] = function(self, opcode)
-    local val = fetch_byte(self)
-    local ah = band(rshift(self.regs[REG_AX], 8), 0xFF)
-    local result = band(cpu_add(self, 0, 0, ah * val, band(self.regs[REG_AX], 0xFF)), 0xFF)
-
-    self.regs[REG_AX] = result
-    set_pzs(self, 8, result)
-
+    self.regs[REG_AX] = band(cpu_add(self, 0, 0, band(rshift(self.regs[REG_AX], 8), 0xFF) * fetch_byte(self), band(self.regs[REG_AX], 0xFF)), 0xFF)
     self.cycles = self.cycles - 54
+    set_pzs(self, 8, self.regs[REG_AX])
 end
 
 -- DAA
@@ -1248,8 +1195,8 @@ end
 
 -- SALC
 opcodes[0xD6] = function(self, opcode)
-    if band(self.flags, 0x01) ~= 0 then
-        self.regs[REG_AX] = bor(self.regs[REG_AX], 0xFF)
+    if band(self.flags, FLAG_C) ~= 0 then
+        self.regs[REG_AX] = bor(self.regs[REG_AX], 0x00FF)
     else
         self.regs[REG_AX] = band(self.regs[REG_AX], 0xFF00)
     end
@@ -1265,44 +1212,93 @@ end
 opcodes[0x80] = function(self, opcode)
     do_mod_rm(self)
 
-    local oper1 = read_rm(self, opcode)
-    local oper2
+    local result = alu_opcodes[self.reg](self, opcode, self.reg,
+        read_rm_byte(self),
+        fetch_byte(self)
+    )
 
-    self.cycles = self.cycles - 2
-
-    if opcode == 0x81 then
-        self.cycles = self.cycles - 1
-        oper2 = fetch_word(self)
-    elseif opcode == 0x83 then
-        oper2 = to_sign_8(fetch_byte(self))
-
-        if self.mode == 3 then
-            self.cycles = self.cycles - 1
-        end
-    else
-        oper2 = fetch_byte(self)
-
-        if self.mode == 3 then
-            self.cycles = self.cycles - 1
-        end
-    end
-
-    local result = alu_opcodes[self.reg](self, opcode, self.reg, oper1, oper2)
+    self.cycles = self.cycles - 3
 
     if self.mode ~= 3 then
-        self.cycles = self.cycles - 3
+        self.cycles = self.cycles - 2
     end
 
     if self.reg ~= 7 then
         self.cycles = self.cycles - 2
-        write_rm(self, opcode, result)
+        write_rm_byte(self, result)
     elseif self.mode ~= 3 then
         self.cycles = self.cycles - 1
     end
 end
-opcodes[0x81] = opcodes[0x80]
-opcodes[0x82] = opcodes[0x80]
-opcodes[0x83] = opcodes[0x80]
+
+opcodes[0x81] = function(self, opcode)
+    do_mod_rm(self)
+
+    local result = alu_opcodes[self.reg](self, opcode, self.reg,
+        read_rm_word(self),
+        fetch_word(self)
+    )
+
+    self.cycles = self.cycles - 3
+
+    if self.mode == 3 then
+        self.cycles = self.cycles - 2
+    end
+
+    if self.reg ~= 7 then
+        self.cycles = self.cycles - 2
+        write_rm_word(self, result)
+    elseif self.mode ~= 3 then
+        self.cycles = self.cycles - 1
+    end
+end
+
+opcodes[0x82] = function(self, opcode)
+    do_mod_rm(self)
+
+    local result = alu_opcodes[self.reg](self, opcode, self.reg,
+        read_rm_byte(self),
+        fetch_byte(self)
+    )
+
+    self.cycles = self.cycles - 3
+
+    if self.mode ~= 3 then
+        self.cycles = self.cycles - 2
+    end
+
+    if self.reg ~= 7 then
+        self.cycles = self.cycles - 2
+        write_rm_byte(self, result)
+    elseif self.mode ~= 3 then
+        self.cycles = self.cycles - 1
+    end
+end
+
+opcodes[0x83] = function(self, opcode)
+    do_mod_rm(self)
+
+    local oper2 = fetch_byte(self)
+    oper2 = oper2 - lshift(band(oper2, 0x80), 1)
+
+    local result = alu_opcodes[self.reg](self, opcode, self.reg,
+        read_rm_word(self),
+        oper2
+    )
+
+    self.cycles = self.cycles - 3
+
+    if self.mode ~= 3 then
+        self.cycles = self.cycles - 2
+    end
+
+    if self.reg ~= 7 then
+        self.cycles = self.cycles - 2
+        write_rm_word(self, result)
+    elseif self.mode ~= 3 then
+        self.cycles = self.cycles - 1
+    end
+end
 
 -- GRP2
 local grp2_table = {
@@ -1318,195 +1314,288 @@ local grp2_table = {
 
 opcodes[0xD0] = function(self, opcode)
     do_mod_rm(self)
+    write_rm_byte(self, grp2_table[self.reg](self, 8, read_rm_byte(self)))
 
-    local bits = lshift(8, band(opcode, 0x01))
-    local result = read_rm(self, opcode)
+    self.cycles = self.cycles - 3
+
+    if self.mode ~= 3 then
+        self.cycles = self.cycles - 9
+    else
+        self.cycles = self.cycles - 7
+    end
+end
+
+opcodes[0xD1] = function(self, opcode)
+    do_mod_rm(self)
+    write_rm_word(self, grp2_table[self.reg](self, 16, read_rm_word(self)))
+
+    self.cycles = self.cycles - 3
+
+    if self.mode ~= 3 then
+        self.cycles = self.cycles - 9
+    else
+        self.cycles = self.cycles - 7
+    end
+end
+
+opcodes[0xD2] = function(self, opcode)
+    do_mod_rm(self)
+
+    local temp = read_rm_byte(self)
+    local count = band(self.regs[REG_CX], 0xFF)
     local operation = grp2_table[self.reg]
 
     self.cycles = self.cycles - 3
 
-    if band(opcode, 0x02) == 0x02 then
-        local count = band(self.regs[REG_CX], 0xFF)
-
-        while count ~= 0 do
-            result = operation(self, bits, result)
-            count = count - 1
-            self.cycles = self.cycles - 4
-        end
-
-        if self.mode ~= 3 then
-            self.cycles = self.cycles - 4
-        else
-            self.cycles = self.cycles - 1
-        end
-    else
-        result = operation(self, bits, result)
-
-        if self.mode ~= 3 then
-            self.cycles = self.cycles - 9
-        else
-            self.cycles = self.cycles - 7
-        end
+    while count ~= 0 do
+        temp = operation(self, 8, temp)
+        count = count - 1
+        self.cycles = self.cycles - 4
     end
 
-    write_rm(self, opcode, result)
+    if self.mode ~= 3 then
+        self.cycles = self.cycles - 4
+    else
+        self.cycles = self.cycles - 1
+    end
+
+    write_rm_byte(self, temp)
 end
-opcodes[0xD1] = opcodes[0xD0]
-opcodes[0xD2] = opcodes[0xD0]
-opcodes[0xD3] = opcodes[0xD0]
+
+opcodes[0xD3] = function(self, opcode)
+    do_mod_rm(self)
+
+    local temp = read_rm_word(self)
+    local count = band(self.regs[REG_CX], 0xFF)
+    local operation = grp2_table[self.reg]
+
+    self.cycles = self.cycles - 3
+
+    while count ~= 0 do
+        temp = operation(self, 16, temp)
+        count = count - 1
+        self.cycles = self.cycles - 4
+    end
+
+    if self.mode ~= 3 then
+        self.cycles = self.cycles - 4
+    else
+        self.cycles = self.cycles - 1
+    end
+
+    write_rm_word(self, temp)
+end
 
 -- GRP3
 local grp3_table = {
-    [1] = function(self, opcode, val) -- TEST
-        local bits = lshift(8, band(opcode, 0x01))
-        local result = band(val, fetch(self, band(opcode, 0x01) == 0x01))
-        set_flags_bit(self, bits, result)
+    [0x01] = function(self, val) -- TEST
+        self.flags = band(self.flags, CLEAR_CAO)
+        set_pzs(self, 8, band(val, fetch_byte(self)))
         self.cycles = self.cycles - 4
 
         if self.mode ~= 3 then
             self.cycles = self.cycles - 2
         end
     end,
-    [2] = function(self, opcode, val) -- NOT
-        write_rm(self, opcode, bnot(val))
-        self.cycles = self.cycles - 5
-    end,
-    [3] = function(self, opcode, val) -- NEG
-        local result = cpu_sub(self, opcode, 0, 0, val)
-        write_rm(self, opcode, result)
-        self.cycles = self.cycles - 5
-    end,
-    [4] = function(self, opcode, val) -- MUL
-        local bits = lshift(8, band(opcode, 0x01))
-
-        self.cycles = self.cycles - 1
+    [0x09] = function(self, val)
+        self.flags = band(self.flags, CLEAR_CAO)
+        set_pzs(self, 16, band(val, fetch_word(self)))
+        self.cycles = self.cycles - 4
 
         if self.mode ~= 3 then
-            self.cycles = self.cycles - 1
+            self.cycles = self.cycles - 2
         end
+    end,
+    [0x02] = function(self, val) -- NOT
+        write_rm_byte(self, bnot(val))
+        self.cycles = self.cycles - 5
+    end,
+    [0x0A] = function(self, val)
+        write_rm_word(self, bnot(val))
+        self.cycles = self.cycles - 5
+    end,
+    [0x03] = function(self, val) -- NEG
+        write_rm_byte(self, cpu_sub(self, 0x00, 0, 0, val))
+        self.cycles = self.cycles - 5
+    end,
+    [0x0B] = function(self, val)
+        write_rm_word(self, cpu_sub(self, 0x01, 0, 0, val))
+        self.cycles = self.cycles - 5
+    end,
+    [0x04] = function(self, val) -- MUL
+        local result = cpu_mul(self, 8, band(self.regs[REG_AX], 0xFF), val)
 
-        if bits == 8 then
-            local result = cpu_mul(self, bits, band(self.regs[REG_AX], 0xFF), val)
-
-            self.regs[REG_AX] = band(result, 0xFFFF)
-
-            set_pzs(self, bits, rshift(self.regs[REG_AX], 8))
-        else
-            local result = cpu_mul(self, bits, self.regs[REG_AX], val)
-
-            self.regs[REG_AX] = band(result, 0xFFFF)
-            self.regs[REG_DX] = band(rshift(result, 16), 0xFFFF)
-
-            set_pzs(self, bits, self.regs[REG_DX])
-        end
-
+        self.cycles = self.cycles - 1
+        self.regs[REG_AX] = band(result, 0xFFFF)
         self.flags = band(self.flags, bnot(FLAG_A))
-    end,
-    [5] = function(self, opcode, val) -- IMUL
-        local bits = lshift(8, band(opcode, 0x01))
+        set_pzs(self, 8, rshift(self.regs[REG_AX], 8))
 
+        if self.mode ~= 3 then
+            self.cycles = self.cycles - 1
+        end
+    end,
+    [0x0C] = function(self, val)
+        local result = cpu_mul(self, 16, self.regs[REG_AX], val)
+
+        self.cycles = self.cycles - 1
+        self.regs[REG_AX] = band(result, 0xFFFF)
+        self.regs[REG_DX] = band(rshift(result, 16), 0xFFFF)
+        self.flags = band(self.flags, bnot(FLAG_A))
+        set_pzs(self, 16, self.regs[REG_DX])
+
+        if self.mode ~= 3 then
+            self.cycles = self.cycles - 1
+        end
+    end,
+    [0x05] = function(self, val) -- IMUL
+        self.regs[REG_AX] = band(cpu_imul(self, 8, band(self.regs[REG_AX], 0xFF), val), 0xFFFF)
         self.cycles = self.cycles - 1
 
         if self.mode ~= 3 then
             self.cycles = self.cycles - 1
         end
-
-        if bits == 8 then
-            local result = cpu_imul(self, bits, band(self.regs[REG_AX], 0xFF), val)
-            self.regs[REG_AX] = band(result, 0xFFFF)
-        else
-            local result = cpu_imul(self, bits, self.regs[REG_AX], val)
-
-            self.regs[REG_AX] = band(result, 0xFFFF)
-            self.regs[REG_DX] = band(rshift(result, 16), 0xFFFF)
-        end
     end,
-    [6] = function(self, opcode, val) -- DIV
-        local bits = lshift(8, band(opcode, 0x01))
+    [0x0D] = function(self, val)
+        local result = cpu_imul(self, 16, self.regs[REG_AX], val)
+
+        self.regs[REG_AX] = band(result, 0xFFFF)
+        self.regs[REG_DX] = band(rshift(result, 16), 0xFFFF)
+        self.cycles = self.cycles - 1
 
         if self.mode ~= 3 then
             self.cycles = self.cycles - 1
         end
-
-        if bits == 16 then
-            local result = cpu_div(self, bits, self.regs[REG_DX], self.regs[REG_AX], val)
-
-            if result then
-                self.regs[REG_DX] = band(result[1], 0xFFFF)
-                self.regs[REG_AX] = band(result[2], 0xFFFF)
-                self.cycles = self.cycles - 1
-            end
-        else
-            local oper1 = self.regs[REG_AX]
-            local result = cpu_div(self, bits, rshift(oper1, 8), band(oper1, 0xFF), val)
-
-            if result then
-                self.regs[REG_AX] = bor(band(result[2], 0xFF), lshift(band(result[1], 0xFF), 8))
-                self.cycles = self.cycles - 1
-            end
-        end
     end,
-    [7] = function(self, opcode, val) -- IDIV
-        local bits = lshift(8, band(opcode, 0x01))
-        local negate = self.rep_type ~= 0
+    [0x06] = function(self, val) -- DIV
+        local result = cpu_div(self, 8, rshift(self.regs[REG_AX], 8), band(self.regs[REG_AX], 0xFF), val)
+
+        if result then
+            self.regs[REG_AX] = bor(band(result[2], 0xFF), lshift(band(result[1], 0xFF), 8))
+            self.cycles = self.cycles - 1
+        end
 
         if self.mode ~= 3 then
             self.cycles = self.cycles - 1
         end
+    end,
+    [0x0E] = function(self, val)
+        local result = cpu_div(self, 16, self.regs[REG_DX], self.regs[REG_AX], val)
 
-        if bits == 16 then
-            local result = cpu_idiv(self, bits, self.regs[REG_DX], self.regs[REG_AX], val, negate)
+        if result then
+            self.regs[REG_DX] = band(result[1], 0xFFFF)
+            self.regs[REG_AX] = band(result[2], 0xFFFF)
+            self.cycles = self.cycles - 1
+        end
 
-            if result then
-                self.regs[REG_DX] = band(result[1], 0xFFFF)
-                self.regs[REG_AX] = band(result[2], 0xFFFF)
-                self.cycles = self.cycles - 1
-            end
-        else
-            local oper1 = self.regs[REG_AX]
-            local result = cpu_idiv(self, bits, rshift(oper1, 8), band(oper1, 0xFF), val, negate)
+        if self.mode ~= 3 then
+            self.cycles = self.cycles - 1
+        end
+    end,
+    [0x07] = function(self, val) -- IDIV
+        local oper1 = self.regs[REG_AX]
+        local result = cpu_idiv(self, 8, rshift(oper1, 8), band(oper1, 0xFF), val, self.rep_type ~= 0)
 
-            if result then
-                self.regs[REG_AX] = bor(band(result[2], 0xFF), lshift(band(result[1], 0xFF), 8))
-                self.cycles = self.cycles - 1
-            end
+        if result then
+            self.regs[REG_AX] = bor(band(result[2], 0xFF), lshift(band(result[1], 0xFF), 8))
+            self.cycles = self.cycles - 1
+        end
+
+        if self.mode ~= 3 then
+            self.cycles = self.cycles - 1
+        end
+    end,
+    [0x0F] = function(self, val)
+        local result = cpu_idiv(self, 16, self.regs[REG_DX], self.regs[REG_AX], val, self.rep_type ~= 0)
+
+        if result then
+            self.regs[REG_DX] = band(result[1], 0xFFFF)
+            self.regs[REG_AX] = band(result[2], 0xFFFF)
+            self.cycles = self.cycles - 1
+        end
+
+        if self.mode ~= 3 then
+            self.cycles = self.cycles - 1
         end
     end
 }
 grp3_table[0x00] = grp3_table[0x01]
+grp3_table[0x08] = grp3_table[0x09]
 
 opcodes[0xF6] = function(self, opcode)
     do_mod_rm(self)
-    grp3_table[self.reg](self, opcode, read_rm(self, opcode))
+    grp3_table[self.reg](self, read_rm_byte(self))
 end
-opcodes[0xF7] = opcodes[0xF6]
+
+opcodes[0xF7] = function(self, opcode)
+    do_mod_rm(self)
+    grp3_table[bor(self.reg, 0x08)](self, read_rm_word(self))
+end
 
 -- GRP4/5
 local grp4_grp5_table = {
-    [0] = function(self, opcode) -- INC rm
-        local bits = lshift(8, band(opcode, 0x01))
-        local val = read_rm(self, opcode)
+    [0x00] = function(self) -- INC R/M
+        local val = read_rm_byte(self)
         local result = val + 1
 
-        set_of_add(self, bits, val, 1, result)
-        set_apzs(self, bits, val, 1, result)
-        write_rm(self, opcode, result)
+        set_of_add(self, 8, val, 1, result)
+        set_apzs(self, 8, val, 1, result)
+        write_rm_byte(self, result)
 
         self.cycles = self.cycles - 3
     end,
-    [1] = function(self, opcode) -- DEC rm
-        local bits = lshift(8, band(opcode, 0x01))
-        local val = read_rm(self, opcode)
+    [0x08] = function(self)
+        local val = read_rm_word(self)
+        local result = val + 1
+
+        set_of_add(self, 16, val, 1, result)
+        set_apzs(self, 16, val, 1, result)
+        write_rm_word(self, result)
+
+        self.cycles = self.cycles - 3
+    end,
+    [0x01] = function(self) -- DEC R/M
+        local val = read_rm_byte(self)
         local result = val - 1
 
-        set_of_sub(self, bits, val, 1, result)
-        set_apzs(self, bits, val, 1, result)
-        write_rm(self, opcode, result)
+        set_of_sub(self, 8, val, 1, result)
+        set_apzs(self, 8, val, 1, result)
+        write_rm_byte(self, result)
 
         self.cycles = self.cycles - 3
     end,
-    [2] = function(self, opcode) -- CALL near abs
-        local new_ip = read_rm(self, opcode)
+    [0x09] = function(self)
+        local val = read_rm_word(self)
+        local result = val - 1
+
+        set_of_sub(self, 16, val, 1, result)
+        set_apzs(self, 16, val, 1, result)
+        write_rm_word(self, result)
+
+        self.cycles = self.cycles - 3
+    end,
+    [0x02] = function(self) -- CALL NEAR R/M
+        local new_ip
+
+        if self.mode == 3 then
+            local old_rm = self.rm
+            self.rm = bxor(self.rm, 0x04)
+            new_ip = bor(get_reg_byte(self, old_rm), lshift(get_reg_byte(self, self.rm), 8))
+        else
+            new_ip = bor(read_rm_byte(self), 0xFF00)
+        end
+
+        self.regs[REG_SP] = band(self.regs[REG_SP] - 2, 0xFFFF)
+        self.memory:write8(lshift(self.segments[SEG_SS], 4) + self.regs[REG_SP], band(self.ip, 0xFF))
+
+        self.ip = new_ip
+        self.cycles = self.cycles - 19
+
+        if self.mode ~= 3 then
+            self.cycles = self.cycles - 1
+        end
+    end,
+    [0x0A] = function(self)
+        local new_ip = read_rm_word(self)
 
         push(self, self.ip)
 
@@ -1517,9 +1606,30 @@ local grp4_grp5_table = {
             self.cycles = self.cycles - 1
         end
     end,
-    [3] = function(self, opcode) -- CALL abs near
-        local new_ip = read_memory(self, opcode, self.ea_seg, self.ea_addr)
-        local new_cs = read_memory(self, opcode, self.ea_seg, self.ea_addr + 2)
+    [0x03] = function(self) -- CALL FAR R/M
+        local new_ip = bor(read_rm_byte(self), 0xFF00)
+
+        self.ea_seg = lshift(self.segments[rm_seg_table[self.rm]], 4)
+
+        local new_cs = bor(self.memory:read8(self.ea_seg + band(self.ea_addr, 0xFFFF)), 0xFF00)
+
+        self.regs[REG_SP] = band(self.regs[REG_SP] - 2, 0xFFFF)
+        self.memory:write8(lshift(self.segments[SEG_SS], 4) + self.regs[REG_SP], band(self.segments[SEG_CS], 0xFF))
+
+        self.regs[REG_SP] = band(self.regs[REG_SP] - 2, 0xFFFF)
+        self.memory:write8(lshift(self.segments[SEG_SS], 4) + self.regs[REG_SP], band(self.ip, 0xFF))
+
+        self.ip = new_ip
+        self.segments[SEG_CS] = new_cs
+        self.cycles = self.cycles - 16
+
+        if self.mode ~= 3 then
+            self.cycles = self.cycles - 1
+        end
+    end,
+    [0x0B] = function(self)
+        local new_ip = bor(self.memory:read8(self.ea_seg + self.ea_addr), lshift(self.memory:read8(self.ea_seg + band(self.ea_addr + 1, 0xFFFF)), 8))
+        local new_cs = bor(self.memory:read8(self.ea_seg + band(self.ea_addr + 2, 0xFFFF)), lshift(self.memory:read8(self.ea_seg + band(self.ea_addr + 3, 0xFFFF)), 8))
 
         push(self, self.segments[SEG_CS])
         push(self, self.ip)
@@ -1532,28 +1642,73 @@ local grp4_grp5_table = {
             self.cycles = self.cycles - 1
         end
     end,
-    [4] = function(self, opcode) -- JMP near abs
-        self.ip = read_rm(self, opcode)
+    [0x04] = function(self) -- JMP NEAR R/M
+        local new_ip
+
+        if self.mode == 3 then
+            local old_rm = self.rm
+            self.rm = bxor(self.rm, 0x04)
+            new_ip = bor(get_reg_byte(self, old_rm), lshift(get_reg_byte(self, self.rm), 8))
+        else
+            new_ip = bor(read_rm_byte(self), 0xFF00)
+        end
+
+        self.ip = new_ip
         self.cycles = self.cycles - 3
 
         if self.mode ~= 3 then
             self.cycles = self.cycles - 1
         end
     end,
-    [5] = function(self, opcode) -- JMP far
-        self.ip = read_memory(self, opcode, self.ea_seg, self.ea_addr)
-        self.segments[SEG_CS] = read_memory(self, opcode, self.ea_seg, self.ea_addr + 2)
+    [0x0C] = function(self)
+        self.ip = read_rm_word(self)
+        self.cycles = self.cycles - 3
+
+        if self.mode ~= 3 then
+            self.cycles = self.cycles - 1
+        end
+    end,
+    [0x05] = function(self) -- JMP FAR R/M
+        local new_ip = bor(read_rm_byte(self), 0xFF00)
+
+        self.ea_seg = lshift(self.segments[rm_seg_table[self.rm]], 4)
+
+        local new_cs = bor(self.memory:read8(self.ea_seg + band(self.ea_addr, 0xFFFF)), 0xFF00)
+
+        self.ip = new_ip
+        self.segments[SEG_CS] = new_cs
         self.cycles = self.cycles - 6
 
         if self.mode ~= 3 then
             self.cycles = self.cycles - 1
         end
     end,
-    [6] = function(self, opcode) -- PUSH rm
-        if (band(opcode, 0x01) == 0x01) and (self.mode == 3) and (self.rm == 4) then -- SP
+    [0x0D] = function(self)
+        local new_ip = read_rm_word(self)
+        local new_cs = bor(self.memory:read8(self.ea_seg + band(self.ea_addr + 2, 0xFFFF)), lshift(self.memory:read8(self.ea_seg + band(self.ea_addr + 3, 0xFFFF)), 8))
+
+        self.ip = new_ip
+        self.segments[SEG_CS] = new_cs
+        self.cycles = self.cycles - 6
+
+        if self.mode ~= 3 then
+            self.cycles = self.cycles - 1
+        end
+    end,
+    [0x06] = function(self) -- PUSH R/M
+        push(self, read_rm_byte(self))
+
+        self.cycles = self.cycles - 6
+
+        if self.mode ~= 3 then
+            self.cycles = self.cycles - 1
+        end
+    end,
+    [0x0E] = function(self)
+        if (self.mode == 3) and (self.rm == 4) then -- SP
             push(self, self.regs[REG_SP] - 2)
         else
-            push(self, read_rm(self, opcode))
+            push(self, read_rm_word(self))
         end
 
         self.cycles = self.cycles - 6
@@ -1565,19 +1720,24 @@ local grp4_grp5_table = {
 }
 
 grp4_grp5_table[0x07] = grp4_grp5_table[0x06]
+grp4_grp5_table[0x0F] = grp4_grp5_table[0x0E]
 
 -- GRP4 / GRP5
 opcodes[0xFE] = function(self, opcode)
     do_mod_rm(self)
-    grp4_grp5_table[self.reg](self, opcode)
+    grp4_grp5_table[self.reg](self)
 end
-opcodes[0xFF] = opcodes[0xFE]
+
+opcodes[0xFF] = function(self, opcode)
+    do_mod_rm(self)
+    grp4_grp5_table[bor(self.reg, 0x08)](self)
+end
 
 ------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 -- Load/store/move instructions.
 ------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
--- PUSH seg
+-- PUSH SEG
 local function generate_opcode_push_seg(opcode, segment)
     opcodes[opcode] = load(string.format([[
         local push = ...
@@ -1593,7 +1753,7 @@ generate_opcode_push_seg(0x0E, SEG_CS)
 generate_opcode_push_seg(0x16, SEG_SS)
 generate_opcode_push_seg(0x1E, SEG_DS)
 
--- POP seg
+-- POP SEG
 local function generate_opcode_pop_seg(opcode, segment)
     opcodes[opcode] = load(string.format([[
         local pop = ...
@@ -1610,7 +1770,7 @@ generate_opcode_pop_seg(0x0F, SEG_CS)
 generate_opcode_pop_seg(0x17, SEG_SS)
 generate_opcode_pop_seg(0x1F, SEG_DS)
 
--- PUSH r16
+-- PUSH REG16
 local function generate_opcode_push_r16(opcode, reg, code)
     opcodes[opcode] = load(string.format([[
         local push = ...
@@ -1630,7 +1790,7 @@ generate_opcode_push_r16(0x55, REG_BP)
 generate_opcode_push_r16(0x56, REG_SI)
 generate_opcode_push_r16(0x57, REG_DI)
 
--- POP r16
+-- POP REG16
 local function generate_opcode_pop_r16(opcode, reg)
     opcodes[opcode] = load(string.format([[
         local pop = ...
@@ -1661,12 +1821,11 @@ opcodes[0x9D] = function(self, opcode)
     local old = self.flags
 
     self.flags = bor(band(pop(self), 0xFD5), 0xF002)
+    self.cycles = self.cycles - 3
 
     if band(bxor(self.flags, old), FLAG_T) ~= 0 then
         self.no_int = 1
     end
-
-    self.cycles = self.cycles - 3
 end
 
 -- POPW
@@ -1680,7 +1839,7 @@ opcodes[0x8F] = function(self, opcode)
     end
 end
 
--- XCHG A, reg
+-- XCHG AX, REG16
 opcodes[0x91] = function(self, opcode)
     local reg = band(opcode, 0x7) + 1
     local temp = self.regs[reg]
@@ -1695,43 +1854,53 @@ opcodes[0x95] = opcodes[0x91]
 opcodes[0x96] = opcodes[0x91]
 opcodes[0x97] = opcodes[0x91]
 
--- XCHG rm, reg
+-- XCHG R/M8, REG8
 opcodes[0x86] = function(self, opcode)
     do_mod_rm(self)
-
-    local val = get_reg(self, opcode, self.reg)
-    set_reg(self, opcode, self.reg, read_rm(self, opcode))
-    write_rm(self, opcode, val)
-
+    local val = get_reg_byte(self, self.reg)
+    set_reg_byte(self, self.reg, read_rm_byte(self))
+    write_rm_byte(self, val)
     self.cycles = self.cycles - 8
 end
-opcodes[0x87] = opcodes[0x86]
 
--- MOV rm, reg
+-- XCHG R/M16, REG16
+opcodes[0x87] = function(self, opcode)
+    do_mod_rm(self)
+    local temp = self.regs[self.reg + 1]
+    self.regs[self.reg + 1] = read_rm_word(self)
+    write_rm_word(self, temp)
+    self.cycles = self.cycles - 8
+end
+
+-- MOV R/M8, REG8
 opcodes[0x88] = function(self, opcode)
     do_mod_rm(self)
-    write_rm(self, opcode, get_reg(self, opcode, self.reg))
-    self.cycles = self.cycles - 2
-
-    if self.mode ~= 3 then
-        self.cycles = self.cycles - 2
-    end
+    write_rm_byte(self, get_reg_byte(self, self.reg))
+    self.cycles = self.cycles - band(self.mode + 1, 0x02)
 end
-opcodes[0x89] = opcodes[0x88]
 
--- MOV reg, rm
+-- MOV R/M16, REG16
+opcodes[0x89] = function(self, opcode)
+    do_mod_rm(self)
+    write_rm_word(self, self.regs[self.reg + 1])
+    self.cycles = self.cycles - band(self.mode + 1, 0x02)
+end
+
+-- MOV REG8, R/M8
 opcodes[0x8A] = function(self, opcode)
     do_mod_rm(self)
-    set_reg(self, opcode, self.reg, read_rm(self, opcode))
-    self.cycles = self.cycles - 2
-
-    if self.mode ~= 3 then
-        self.cycles = self.cycles - 2
-    end
+    set_reg_byte(self, self.reg, read_rm_byte(self))
+    self.cycles = self.cycles - 2 - band(self.mode + 1, 0x02)
 end
-opcodes[0x8B] = opcodes[0x8A]
 
--- MOV rm, seg
+-- MOV REG16, R/M16
+opcodes[0x8B] =  function(self, opcode)
+    do_mod_rm(self)
+    self.regs[self.reg + 1] = read_rm_word(self)
+    self.cycles = self.cycles - 2 - band(self.mode + 1, 0x02)
+end
+
+-- MOV R/M16, SEG
 opcodes[0x8C] = function(self, opcode)
     do_mod_rm(self)
     write_rm_word(self, self.segments[band(self.reg, 0x03) + 1])
@@ -1742,7 +1911,7 @@ opcodes[0x8C] = function(self, opcode)
     end
 end
 
--- MOV seg, rm
+-- MOV SEG, R/M16
 opcodes[0x8E] = function(self, opcode)
     do_mod_rm(self)
     self.segments[band(self.reg, 0x03) + 1] = read_rm_word(self)
@@ -1758,57 +1927,62 @@ opcodes[0x8E] = function(self, opcode)
     end
 end
 
--- MOV rm, imm
+-- MOV R/M8, IMM8
 opcodes[0xC6] = function(self, opcode)
     do_mod_rm(self)
-    write_rm(self, opcode, fetch(self, band(opcode, 0x1) ~= 0))
+    write_rm_byte(self, fetch_byte(self))
     self.cycles = self.cycles - 4
 
     if self.mode ~= 3 then
         self.cycles = self.cycles - 10
     end
 end
-opcodes[0xC7] = opcodes[0xC6]
 
--- MOV AL, offset8
+-- MOV R/M16, IMM16
+opcodes[0xC7] = function(self, opcode)
+    do_mod_rm(self)
+    write_rm_word(self, fetch_word(self))
+    self.cycles = self.cycles - 4
+
+    if self.mode ~= 3 then
+        self.cycles = self.cycles - 10
+    end
+end
+
+-- MOV AL, [IMM16]
 opcodes[0xA0] = function(self, opcode)
-    local addr = fetch_word(self)
-    self.regs[REG_AX] = bor(band(self.regs[REG_AX], 0xFF00), self.memory:read8(lshift(self.segments[self.segment_mode or 4], 4) + addr))
+    self.regs[REG_AX] = bor(band(self.regs[REG_AX], 0xFF00), self.memory:read8(lshift(self.segments[self.segment_mode or 4], 4) + fetch_word(self)))
     self.cycles = self.cycles - 7
 end
 
--- MOV AX, offset16
+-- MOV AX, [IMM16]
 opcodes[0xA1] = function(self, opcode)
-    local addr = fetch_word(self)
-    self.regs[REG_AX] = self.memory:read16_l(lshift(self.segments[self.segment_mode or 4], 4) + addr)
+    self.regs[REG_AX] = self.memory:read16_l(lshift(self.segments[self.segment_mode or 4], 4) + fetch_word(self))
     self.cycles = self.cycles - 11
 end
 
--- MOV offset8, AL
+-- MOV [IMM16], AL
 opcodes[0xA2] = function(self, opcode)
-    local addr = fetch_word(self)
-    self.memory:write8(lshift(self.segments[self.segment_mode or 4], 4) + addr, band(self.regs[REG_AX], 0xFF))
+    self.memory:write8(lshift(self.segments[self.segment_mode or 4], 4) + fetch_word(self), band(self.regs[REG_AX], 0xFF))
     self.cycles = self.cycles - 6
 end
 
--- MOV offset16, AL
+-- MOV [IMM16], AL
 opcodes[0xA3] = function(self, opcode)
-    local addr = fetch_word(self)
-    self.memory:write16_l(lshift(self.segments[self.segment_mode or 4], 4) + addr, self.regs[REG_AX])
+    self.memory:write16_l(lshift(self.segments[self.segment_mode or 4], 4) + fetch_word(self), self.regs[REG_AX])
     self.cycles = self.cycles - 10
 end
 
--- MOV regL, imm8
+-- MOV REG8, IMM8
 opcodes[0xB0] = function(self, opcode)
-    local reg = band(opcode, 0x03) + 1
-    self.regs[reg] = bor(band(self.regs[reg], 0xFF00), fetch_byte(self))
+    self.regs[band(opcode, 0x03) + 1] = bor(band(self.regs[band(opcode, 0x03) + 1], 0xFF00), fetch_byte(self))
     self.cycles = self.cycles - 2
 end
 opcodes[0xB1] = opcodes[0xB0]
 opcodes[0xB2] = opcodes[0xB0]
 opcodes[0xB3] = opcodes[0xB0]
 
--- MOV regH, imm8
+-- MOV REG8, IMM8
 opcodes[0xB4] = function(self, opcode)
     local reg = band(opcode, 0x03) + 1
     self.regs[reg] = bor(band(self.regs[reg], 0xFF), lshift(fetch_byte(self), 8))
@@ -1818,7 +1992,7 @@ opcodes[0xB5] = opcodes[0xB4]
 opcodes[0xB6] = opcodes[0xB4]
 opcodes[0xB7] = opcodes[0xB4]
 
--- MOV reg, imm16
+-- MOV REG16, IMM16
 opcodes[0xB8] = function(self, opcode)
     self.regs[band(opcode, 0x07) + 1] = fetch_word(self)
     self.cycles = self.cycles - 2
@@ -1831,26 +2005,31 @@ opcodes[0xBD] = opcodes[0xB8]
 opcodes[0xBE] = opcodes[0xB8]
 opcodes[0xBF] = opcodes[0xB8]
 
--- LES/LDS
+-- LES
 opcodes[0xC4] = function(self, opcode)
     do_mod_rm(self)
 
-    self.regs[self.reg + 1] = memory_read16(self, self.ea_seg, self.ea_addr)
-    local val = memory_read16(self, self.ea_seg, band(self.ea_addr + 2, 0xFFFF))
-
-    if opcode == 0xC5 then
-        self.segments[SEG_DS] = val
-    else
-        self.segments[SEG_ES] = val
-    end
-
-    self.cycles = self.cycles - 7
+    self.regs[self.reg + 1] = bor(self.memory:read8(self.ea_seg + self.ea_addr), lshift(self.memory:read8(self.ea_seg + band(self.ea_addr + 1, 0xFFFF)), 8))
+    self.segments[SEG_ES] = bor(self.memory:read8(self.ea_seg + band(self.ea_addr + 2, 0xFFFF)), lshift(self.memory:read8(self.ea_seg + band(self.ea_addr + 3, 0xFFFF)), 8))
+    self.cycles = self.cycles - 15
 
     if self.mode ~= 3 then
         self.cycles = self.cycles - 2
     end
 end
-opcodes[0xC5] = opcodes[0xC4]
+
+-- LDS
+opcodes[0xC5] = function(self, opcode)
+    do_mod_rm(self)
+
+    self.regs[self.reg + 1] = bor(self.memory:read8(self.ea_seg + self.ea_addr), lshift(self.memory:read8(self.ea_seg + band(self.ea_addr + 1, 0xFFFF)), 8))
+    self.segments[SEG_DS] = bor(self.memory:read8(self.ea_seg + band(self.ea_addr + 2, 0xFFFF)), lshift(self.memory:read8(self.ea_seg + band(self.ea_addr + 3, 0xFFFF)), 8))
+    self.cycles = self.cycles - 15
+
+    if self.mode ~= 3 then
+        self.cycles = self.cycles - 2
+    end
+end
 
 -- LEA
 opcodes[0x8D] = function(self, opcode)
@@ -1921,9 +2100,27 @@ opcodes[0xA6] = function(self, opcode)
         return
     end
 
-    local oper1 = cpu_loads(self, opcode)
-    local oper2 = read_memory(self, opcode, lshift(self.segments[SEG_ES], 4), self.regs[REG_DI])
+    local oper1
+    local oper2
 
+    if band(opcode, 0x01) ~= 0 then
+        local segment
+
+        segment = lshift(self.segments[self.segment_mode or SEG_DS], 4)
+        oper1 = bor(self.memory:read8(segment + self.regs[REG_SI]), lshift(self.memory:read8(segment + band(self.regs[REG_SI] + 1, 0xFFFF)), 8))
+
+        segment = lshift(self.segments[SEG_ES], 4)
+        oper2 = bor(self.memory:read8(segment + self.regs[REG_DI]), lshift(self.memory:read8(segment + band(self.regs[REG_DI] + 1, 0xFFFF)), 8))
+
+        self.cycles = self.cycles - 16
+    else
+        oper1 = self.memory:read8(lshift(self.segments[self.segment_mode or SEG_DS], 4) + self.regs[REG_SI])
+        oper2 = self.memory:read8(lshift(self.segments[SEG_ES], 4) + self.regs[REG_DI])
+
+        self.cycles = self.cycles - 8
+    end
+
+    self.regs[REG_SI] = string_increment(self, opcode, self.regs[REG_SI])
     self.regs[REG_DI] = string_increment(self, opcode, self.regs[REG_DI])
     self.cycles = self.cycles - 5
 
@@ -2016,12 +2213,16 @@ opcodes[0xAE] = function(self, opcode)
     end
 
     local oper1
-    local oper2 = read_memory(self, opcode, lshift(self.segments[SEG_ES], 4), self.regs[REG_DI])
+    local oper2
 
-    if band(opcode, 0x01) == 0x01 then
+    if band(opcode, 0x01) ~= 0 then
         oper1 = self.regs[REG_AX]
+        oper2 = bor(self.memory:read8(lshift(self.segments[SEG_ES], 4) + self.regs[REG_DI]), lshift(self.memory:read8(lshift(self.segments[SEG_ES], 4) + band(self.regs[REG_DI] + 1, 0xFFFF)), 8))
+        self.cycles = self.cycles - 8
     else
         oper1 = band(self.regs[REG_AX], 0xFF)
+        oper2 = self.memory:read8(lshift(self.segments[SEG_ES], 4)  + band(self.regs[REG_DI], 0xFFFF))
+        self.cycles = self.cycles - 4
     end
 
     self.regs[REG_DI] = string_increment(self, opcode, self.regs[REG_DI])
@@ -2073,31 +2274,33 @@ local jmp_conds = {
 
 local function generate_opcode_jmp_cond(opcode, cond)
     opcodes[opcode] = load(string.format([[
-        local to_sign_8, fetch_byte, band, FLAG_O, FLAG_C, FLAG_Z, FLAG_S, FLAG_P = ...
+        local fetch_byte, lshift, band, FLAG_O, FLAG_C, FLAG_Z, FLAG_S, FLAG_P = ...
         return function(self, opcode)
             local offset = fetch_byte(self)
             self.cycles = self.cycles - 2
 
             if %s then
-                self.ip = band(self.ip + to_sign_8(offset), 0xFFFF)
+                offset = offset - lshift(band(offset, 0x80), 1)
+                self.ip = band(self.ip + offset, 0xFFFF)
                 self.cycles = self.cycles - 5
             end
         end
-    ]], cond), "=i8088.lua-jmp", "t")(to_sign_8, fetch_byte, band, FLAG_O, FLAG_C, FLAG_Z, FLAG_S, FLAG_P)
+    ]], cond), "=i8088.lua-jmp", "t")(fetch_byte, lshift, band, FLAG_O, FLAG_C, FLAG_Z, FLAG_S, FLAG_P)
 end
 
 for i = 0x60, 0x7F, 1 do
     generate_opcode_jmp_cond(i, jmp_conds[band(i, 0xF)])
 end
 
--- JMP rel16
+-- JMP REL8
 opcodes[0xE9] = function(self, opcode)
-    local offset = to_sign_16(fetch_word(self))
+    local offset = fetch_word(self)
+    offset = offset - lshift(band(offset, 0x8000), 1)
     self.ip = band(self.ip + offset, 0xFFFF)
     self.cycles = self.cycles - 6
 end
 
--- JMP ptr
+-- JMP IMM16
 opcodes[0xEA] = function(self, opcode)
     local new_ip = fetch_word(self)
     local new_cs = fetch_word(self)
@@ -2106,16 +2309,18 @@ opcodes[0xEA] = function(self, opcode)
     self.cycles = self.cycles - 7
 end
 
--- JMP rel8
+-- JMP REL8
 opcodes[0xEB] = function(self, opcode)
-    local offset = to_sign_8(fetch_byte(self))
+    local offset = fetch_byte(self)
+    offset = offset - lshift(band(offset, 0x80), 1)
     self.ip = band(self.ip + offset, 0xFFFF)
     self.cycles = self.cycles - 7
 end
 
--- JCXZ r8
+-- JCXZ REL8
 opcodes[0xE3] = function(self, opcode)
-    local offset = to_sign_8(fetch_byte(self))
+    local offset = fetch_byte(self)
+    offset = offset - lshift(band(offset, 0x80), 1)
     self.cycles = self.cycles - 4
 
     if self.regs[REG_CX] == 0 then
@@ -2137,9 +2342,10 @@ opcodes[0x9A] = function(self, opcode)
     self.cycles = self.cycles - 15
 end
 
--- CALL rel16
+-- CALL REL16
 opcodes[0xE8] = function(self, opcode)
-    local offset = to_sign_16(fetch_word(self))
+    local offset = fetch_word(self)
+    offset = offset - lshift(band(offset, 0x8000), 1)
     push(self, self.ip)
     self.ip = band(self.ip + offset, 0xFFFF)
     self.cycles = self.cycles - 5
@@ -2179,9 +2385,10 @@ opcodes[0xCB] = function(self, opcode)
 end
 opcodes[0xC9] = opcodes[0xCB]
 
--- LOOPNZ rel8
+-- LOOPNZ REL8
 opcodes[0xE0] = function(self, opcode)
-    local offset = to_sign_8(fetch_byte(self))
+    local offset = fetch_byte(self)
+    offset = offset - lshift(band(offset, 0x80), 1)
 
     self.regs[REG_CX] = band(self.regs[REG_CX] - 1, 0xFFFF)
     self.cycles = self.cycles - 4
@@ -2192,9 +2399,10 @@ opcodes[0xE0] = function(self, opcode)
     end
 end
 
--- LOOPZ rel8
+-- LOOPZ REL8
 opcodes[0xE1] = function(self, opcode)
-    local offset = to_sign_8(fetch_byte(self))
+    local offset = fetch_byte(self)
+    offset = offset - lshift(band(offset, 0x80), 1)
 
     self.regs[REG_CX] = band(self.regs[REG_CX] - 1, 0xFFFF)
     self.cycles = self.cycles - 4
@@ -2205,9 +2413,10 @@ opcodes[0xE1] = function(self, opcode)
     end
 end
 
--- LOOP rel8
+-- LOOP REL8
 opcodes[0xE2] = function(self, opcode)
-    local offset = to_sign_8(fetch_byte(self))
+    local offset = fetch_byte(self)
+    offset = offset - lshift(band(offset, 0x80), 1)
 
     self.regs[REG_CX] = band(self.regs[REG_CX] - 1, 0xFFFF)
     self.cycles = self.cycles - 3
@@ -2227,7 +2436,7 @@ opcodes[0xCC] = function(self, opcode)
     call_interrupt(self, 0x03)
 end
 
--- INT imm
+-- INT IMM8
 opcodes[0xCD] = function(self, opcode)
     call_interrupt(self, fetch_byte(self))
     self.cycles = self.cycles - 1
@@ -2607,26 +2816,30 @@ local function set_clock(self, clock)
 end
 
 local function reset(self)
-    for i = 1, 8, 1 do
-        self.regs[i] = 0
-    end
-
+    self.regs[1] = 0x0000
+    self.regs[2] = 0x0000
+    self.regs[3] = 0x0000
+    self.regs[4] = 0x0000
+    self.regs[5] = 0x0000
+    self.regs[6] = 0x0000
+    self.regs[7] = 0x0000
+    self.regs[8] = 0x0000
     self.segments[1] = 0x0000
     self.segments[2] = self.reset_cs
     self.segments[3] = 0x0000
     self.segments[4] = 0x0000
     self.ip = self.reset_ip
-    self.flags = 0
-    self.rep_type = 0
+    self.flags = 0x0000
+    self.rep_type = 0x00
+    self.no_int = 0x00
+    self.cycles = 0
+    self.cycles_start = 0
     self.segment_mode = nil
-    self.no_int = 0
     self.completed = false
     self.repeating = false
     self.nmi = false
     self.nmi_enabled = false
     self.nmi_triggered = false
-    self.cycles = 0
-    self.cycles_start = 0
     self.scheduler:reset()
 end
 

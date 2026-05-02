@@ -12,7 +12,7 @@ local STATE_ICW3 = 2
 local STATE_ICW4 = 3
 
 local ICW1_ICW4	           = 0x01
-local ICW1_CASCADE_MODE    = 0x02
+local ICW1_SINGLE_MODE     = 0x02
 local ICW1_CALL_ADDRESS4   = 0x04
 local ICW1_LEVEL_TRIGGERED = 0x08
 local ICW1_ICW1            = 0x10
@@ -21,9 +21,6 @@ local ICW4_i86_MODE = 0x01
 local ICW4_AUTO_EOI = 0x02
 
 local OCW_OCW3 = 0x08
-
-local OCW2_NONSPECIFIC_EOI = 0x20
-local OCW2_SPECIFIC_EOI    = 0x60
 
 local OCW3_SPECIAL_MASK_MODE = 0x40
 local OCW3_POLL_ACTION       = 0x04
@@ -107,13 +104,12 @@ local function get_interrupt_vector(self)
        self.irr = band(self.irr, bnot(mask))
     end
 
+    self.int_pending = false
+
     if band(self.icw4, ICW4_i86_MODE) ~= 0 then
-        self.int_pending = false
         eoi(self)
         vector = interrupt + band(self.icw2, 0xF8)
     else
-        self.int_pending = false
-
         if band(self.icw1, ICW1_CALL_ADDRESS4) ~= 0 then
             vector = lshift(interrupt, 2) + band(self.icw1, 0xE0)
         else
@@ -147,8 +143,8 @@ local function port_command_out(self, cpu, port, val)
         self.irr = 0x00
         self.imr = 0x00
         self.isr = 0x00
+        self.priority = 0x00
         self.interrupt = 0x17
-        self.priority = 0
         self.state = STATE_ICW2
         self.auto_rotate = false
         self.special_mode = false
@@ -165,11 +161,17 @@ local function port_command_out(self, cpu, port, val)
         if band(self.ocw3, OCW3_SPECIAL_MASK_MODE) ~= 0 then
             self.special_mode = band(self.ocw3, 0x20) ~= 0
         end
-    elseif band(val, OCW2_NONSPECIFIC_EOI) ~= 0 then
-        local irq = get_interrupt_is(self)
+    elseif band(val, 0x60) ~= 0 then
+        local irq
 
-        if irq == 0xFF then
-            return
+        if band(val, 0x40) ~= 0 then
+            irq = band(val, 0x07)
+        else
+            irq = get_interrupt_is(self)
+
+            if irq == 0xFF then
+                return
+            end
         end
 
         if band(val, 0x20) ~= 0 then
@@ -181,16 +183,6 @@ local function port_command_out(self, cpu, port, val)
         end
 
         update_pending(self)
-    elseif band(val, OCW2_SPECIFIC_EOI) ~= 0 then
-        if band(val, 0x20) ~= 0 then
-            self.isr = band(self.isr, bnot(lshift(1, band(val, 0x07))))
-        end
-
-        if band(val, 0x80) ~= 0 then
-            self.priority = band(band(val, 0x07) + 1, 0x07)
-        end
-
-        update_pending(self)
     else
         self.auto_rotate = band(val, 0x80) ~= 0
     end
@@ -199,6 +191,7 @@ end
 local function port_command_in(self, cpu, port)
     if band(self.ocw3, OCW3_POLL_ACTION) ~= 0 then
         self.interrupt = band(self.interrupt, bnot(0x20)) -- Disable Interrupts
+        self.ocw3 = band(self.ocw3, bnot(OCW3_POLL_ACTION))
 
         if self.int_pending then
             local irq = band(self.interrupt, 0x07)
@@ -212,8 +205,6 @@ local function port_command_in(self, cpu, port)
 
             return bor(irq, 0x80)
         end
-
-        self.ocw3 = band(self.ocw3, bnot(OCW3_POLL_ACTION))
 
         return 0x00
     end
@@ -234,7 +225,7 @@ local function port_data_out(self, cpu, port, val)
     elseif self.state == STATE_ICW2 then
         self.icw2 = val
 
-        if band(self.icw1, ICW1_CASCADE_MODE) ~= 0 then
+        if band(self.icw1, ICW1_SINGLE_MODE) == 0 then
             self.state = STATE_ICW3
             return
         end
@@ -280,7 +271,7 @@ local function reset(self)
     self.irr = 0x00
     self.imr = 0x00
     self.isr = 0x00
-    self.priority = 0
+    self.priority = 0x00
     self.interrupt = 0x17
     self.state = STATE_NONE
     self.int_pending = false

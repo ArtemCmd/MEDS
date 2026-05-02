@@ -1,5 +1,5 @@
 -- =====================================================================================================================================================================
--- Direct Memory Access Controller (i8237) emulation.
+-- Direct Memory Access Controller emulation.
 -- =====================================================================================================================================================================
 
 local band, bor, rshift, lshift, bxor, bnot = bit.band, bit.bor, bit.rshift, bit.lshift, bit.bxor, bit.bnot
@@ -25,13 +25,13 @@ local page_channels = {[0] = -1, 2, 3, 1, -1, -1, -1, 0}
 
 local function create_channel(self, channel)
     self.channels[channel] = {
-        curr_addr = 0,
-        base_addr = 0,
-        base_count = 0,
-        curr_count = 0,
-        transfer_type = 0,
-        transfer_mode = 0,
-        page = 0,
+        curr_addr = 0x000000,
+        base_addr = 0x000000,
+        base_count = 0x0000,
+        curr_count = 0x0000,
+        transfer_type = 0x00,
+        transfer_mode = 0x00,
+        page = 0x00,
         auto_init = false,
         decrement = false
     }
@@ -40,13 +40,13 @@ end
 local function reset_channel(self, channel_num)
     local channel = self.channels[channel_num]
 
-    channel.curr_addr = 0
-    channel.base_addr = 0
-    channel.base_count = 0
-    channel.curr_count = 0
-    channel.transfer_type = 0
-    channel.transfer_mode = 0
-    channel.page = 0
+    channel.curr_addr = 0x000000
+    channel.base_addr = 0x000000
+    channel.base_count = 0x0000
+    channel.curr_count = 0x0000
+    channel.transfer_type = 0x00
+    channel.transfer_mode = 0x00
+    channel.page = 0x00
     channel.auto_init = false
     channel.decrement = false
 end
@@ -75,7 +75,6 @@ local function channel_read(self, channel_num, check_mask)
         channel.curr_addr = bor(band(channel.curr_addr, 0xFF0000), band(channel.curr_addr + 1, 0xFFFF))
     end
 
-    self.request_reg = bor(self.request_reg, channel_mask)
     channel.curr_count = channel.curr_count - 1
 
     if channel.curr_count < 0 then
@@ -118,7 +117,6 @@ local function channel_write(self, channel_num, val, check_mask)
         channel.curr_addr = bor(band(channel.curr_addr, 0xFF0000), band(channel.curr_addr + 1, 0xFFFF))
     end
 
-    self.request_reg = bor(self.request_reg, channel_mask)
     channel.curr_count = channel.curr_count - 1
 
     if channel.curr_count < 0 then
@@ -145,10 +143,12 @@ local function block_transfer(self, channel_num)
     local channel = self.channels[channel_num]
 
     if channel.transfer_mode == TRANSFER_MODE_BLOCK then
-        for i = 0, channel.base_count, 1 do
-            if channel.transfer_type == TRANSFER_TYPE_READ then
+        if channel.transfer_type == TRANSFER_TYPE_READ then
+            for i = 0, channel.base_count, 1 do
                 self.buffer[i] = channel_read(self, channel_num, false)
-            elseif channel.transfer_type == TRANSFER_TYPE_WRITE then
+            end
+        elseif channel.transfer_type == TRANSFER_TYPE_WRITE then
+            for i = 0, channel.base_count, 1 do
                 channel_write(self, channel_num, self.buffer[i], false)
             end
         end
@@ -156,13 +156,8 @@ local function block_transfer(self, channel_num)
 end
 
 local function mem_to_mem_transfer(self)
-    local channel = self.channels[0]
-
-    for i = 0, channel.base_count, 1 do
+    for i = 0, self.channels[0].base_count, 1 do
         self.buffer[i] = band(channel_read(self, 0), 0xFF)
-    end
-
-    for i = 0, channel.base_count, 1 do
         channel_write(self, 0, self.buffer[i], false)
     end
 end
